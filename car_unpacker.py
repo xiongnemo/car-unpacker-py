@@ -756,6 +756,11 @@ def _process_rendition(csi_data: bytes, out_dir: str, idx: int, lzfse_bin: str):
         _extract_mlec_image(csi_data, bitmap_start, out_dir, idx, csi.name, lzfse_bin, csi)
         return
 
+    # RAWD/DWAR: raw data (JPEG, HEIF, PDF, text, etc.)
+    if bmp_tag in (b'RAWD', b'DWAR'):
+        _extract_rawd_data(csi_data, bitmap_start, out_dir, idx, csi.name, lzfse_bin)
+        return
+
     # Find dmp2 magic
     dm2_off = csi_data.find(b'dmp2', bitmap_start)
     if dm2_off < 0:
@@ -763,6 +768,44 @@ def _process_rendition(csi_data: bytes, out_dir: str, idx: int, lzfse_bin: str):
         return
 
     _extract_dm2_image(csi_data, dm2_off, out_dir, idx, csi.name, lzfse_bin)
+
+
+def _extract_rawd_data(csi_data, offset, out_dir, idx, name, lzfse_bin):
+    if offset + 12 > len(csi_data):
+        print("    (RAWD header too small)")
+        return
+
+    flags = struct.unpack_from('<I', csi_data, offset + 4)[0]
+    data_len = struct.unpack_from('<I', csi_data, offset + 8)[0]
+    raw_data = csi_data[offset + 12:offset + 12 + data_len]
+
+    if flags != 0 and lzfse_bin:
+        try:
+            raw_data = decompress_lzfse(lzfse_bin, raw_data)
+        except Exception:
+            pass
+
+    ext = '.bin'
+    if len(raw_data) >= 2 and raw_data[0] == 0xFF and raw_data[1] == 0xD8:
+        ext = '.jpg'
+    elif len(raw_data) >= 4 and raw_data[:4] == b'\x89PNG':
+        ext = '.png'
+    elif len(raw_data) >= 4 and raw_data[:4] == b'%PDF':
+        ext = '.pdf'
+    elif len(raw_data) >= 12 and raw_data[4:8] == b'ftyp':
+        ext = '.heif'
+    elif len(raw_data) >= 1:
+        # Try to detect text
+        try:
+            raw_data.decode('utf-8')
+            ext = '.txt'
+        except UnicodeDecodeError:
+            pass
+
+    out_path = os.path.join(out_dir, f"{idx:03d}_{sanitize_filename(name)}{ext}")
+    with open(out_path, 'wb') as f:
+        f.write(raw_data)
+    print(f"    RAWD: {len(raw_data)} bytes -> {out_path}")
 
 
 def _extract_mlec_image(csi_data, offset, out_dir, idx, name, lzfse_bin, csi):
