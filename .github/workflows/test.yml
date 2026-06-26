@@ -1,0 +1,44 @@
+name: Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.8', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build lzfse
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            gcc -O2 -o lzfse.exe src/lzfse_*.c src/lzvn_*.c -Isrc
+          else
+            gcc -O2 -o lzfse src/lzfse_*.c src/lzvn_*.c -Isrc
+          fi
+        working-directory: _tools/lzfse
+
+      - name: Run on test file
+        run: python car_unpacker.py test_fixtures/timac_demo.car test_output
+
+      - name: Verify output directory exists
+        run: |
+          if [ -d "test_output" ]; then
+            echo "Output directory created successfully"
+            ls -la test_output/
+          else
+            echo "Output directory not found"
+            exit 1
+          fi
+        shell: bash
