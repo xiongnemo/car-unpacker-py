@@ -479,16 +479,18 @@ def _decode_palette(header, decompressed, width, height):
 # ============================================================
 
 def find_lzfse_binary() -> str:
-    candidates = [
-        '_tools/lzfse/lzfse.exe',
-        '_tools/lzfse/lzfse',
-        '_tools/lzfse/build/lzfse',
-        '_tools/lzfse/build/lzfse.exe',
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
     import shutil
+    # Try next to the script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for name in ('lzfse.exe', 'lzfse'):
+        p = os.path.join(script_dir, name)
+        if os.path.exists(p):
+            return p
+    # Try working directory
+    for name in ('lzfse.exe', 'lzfse'):
+        if os.path.exists(name):
+            return os.path.abspath(name)
+    # Try PATH
     p = shutil.which('lzfse')
     if p:
         return p
@@ -523,7 +525,14 @@ def decompress_lzfse(lzfse_bin: str, data: bytes) -> bytes:
 
 def write_png(path: str, width: int, height: int, rgba: bytes):
     """Write RGBA data as PNG using stdlib zlib."""
-    # Check if grayscale
+    # Check if all alpha values are 0xFF (opaque)
+    has_alpha = False
+    for i in range(width * height):
+        if rgba[i * 4 + 3] != 0xFF:
+            has_alpha = True
+            break
+
+    # Check if grayscale (R==G==B for all pixels)
     is_gray = True
     for i in range(width * height):
         r, g, b = rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]
@@ -531,19 +540,37 @@ def write_png(path: str, width: int, height: int, rgba: bytes):
             is_gray = False
             break
 
-    if is_gray:
+    if is_gray and not has_alpha:
         bpp = 1
         raw = bytearray()
         for y in range(height):
-            raw.append(0)  # filter: None
+            raw.append(0)
             for x in range(width):
                 raw.append(rgba[(y * width + x) * 4])
         color_type = 0
+    elif is_gray and has_alpha:
+        bpp = 2
+        raw = bytearray()
+        for y in range(height):
+            raw.append(0)
+            for x in range(width):
+                off = (y * width + x) * 4
+                raw.extend([rgba[off], rgba[off + 3]])
+        color_type = 4
+    elif has_alpha:
+        bpp = 4
+        raw = bytearray()
+        for y in range(height):
+            raw.append(0)
+            for x in range(width):
+                off = (y * width + x) * 4
+                raw.extend([rgba[off], rgba[off + 1], rgba[off + 2], rgba[off + 3]])
+        color_type = 6
     else:
         bpp = 3
         raw = bytearray()
         for y in range(height):
-            raw.append(0)  # filter: None
+            raw.append(0)
             for x in range(width):
                 off = (y * width + x) * 4
                 raw.extend([rgba[off], rgba[off + 1], rgba[off + 2]])
@@ -724,6 +751,11 @@ def _process_rendition(csi_data: bytes, out_dir: str, idx: int, lzfse_bin: str):
     bmp_tag = csi_data[bitmap_start:bitmap_start + 4]
     print(f"    Bitmap tag: {bmp_tag.decode('ascii', errors='replace')}")
 
+    # MLEC/CELM: compression-based bitmap
+    if bmp_tag in (b'MLEC', b'CELM'):
+        _extract_mlec_image(csi_data, bitmap_start, out_dir, idx, csi.name, lzfse_bin, csi)
+        return
+
     # Find dmp2 magic
     dm2_off = csi_data.find(b'dmp2', bitmap_start)
     if dm2_off < 0:
@@ -731,6 +763,65 @@ def _process_rendition(csi_data: bytes, out_dir: str, idx: int, lzfse_bin: str):
         return
 
     _extract_dm2_image(csi_data, dm2_off, out_dir, idx, csi.name, lzfse_bin)
+
+
+def _extract_mlec_image(csi_data, offset, out_dir, idx, name, lzfse_bin, csi):
+    if offset + 16 > len(csi_data):
+        print("    (MLEC header too small)")
+        return
+
+    comp_type = struct.unpack_from('<I', csi_data, offset + 8)[0]
+    raw_len = struct.unpack_from('<I', csi_data, offset + 12)[0]
+    raw_data = csi_data[offset + 16:offset + 16 + raw_len]
+
+    if comp_type == 8:  # palette-img
+        _extract_palette_image(raw_data, lzfse_bin, out_dir, idx, name, csi)
+    elif comp_type == 11:  # deepmap2
+        dm2_off = raw_data.find(b'dmp2')
+        if dm2_off >= 0:
+            _extract_dm2_image(raw_data, dm2_off, out_dir, idx, name, lzfse_bin)
+        else:
+            print("    (no dmp2 in MLEC deepmap2 block)")
+    else:
+        dm2_off = raw_data.find(b'dmp2')
+        if dm2_off >= 0:
+            _extract_dm2_image(raw_data, dm2_off, out_dir, idx, name, lzfse_bin)
+        else:
+            print(f"    (unsupported MLEC compression type {comp_type})")
+
+
+def _extract_palette_image(compressed, lzfse_bin, out_dir, idx, name, csi):
+    decompressed = decompress_lzfse(lzfse_bin, compressed)
+
+    if len(decompressed) < 10:
+        print("    (palette data too small)")
+        return
+
+    pal_magic = struct.unpack_from('<I', decompressed, 0)[0]
+    pal_version = struct.unpack_from('<I', decompressed, 4)[0]
+    pal_count = struct.unpack_from('<H', decompressed, 8)[0]
+
+    w, h = csi.width, csi.height
+    expected = 10 + pal_count * 4 + w * h
+    if len(decompressed) < expected:
+        print(f"    (palette data too short: need {expected}, got {len(decompressed)})")
+        return
+
+    print(f"    palette-img: magic=0x{pal_magic:08X} ver={pal_version} count={pal_count} {w}x{h}")
+
+    # Build RGBA from palette + indices
+    rgba = bytearray(w * h * 4)
+    for i in range(w * h):
+        idx_val = decompressed[10 + pal_count * 4 + i]
+        bgra = struct.unpack_from('<I', decompressed, 10 + idx_val * 4)[0]
+        rgba[i * 4]     = (bgra >> 16) & 0xFF  # R
+        rgba[i * 4 + 1] = (bgra >> 8) & 0xFF   # G
+        rgba[i * 4 + 2] = bgra & 0xFF           # B
+        rgba[i * 4 + 3] = (bgra >> 24) & 0xFF   # A
+
+    out_path = os.path.join(out_dir, f"{idx:03d}_{sanitize_filename(name)}.png")
+    write_png(out_path, w, h, bytes(rgba))
+    print(f"    Wrote: {out_path} ({w}x{h})")
 
 
 def _extract_dm2_image(csi_data: bytes, dm2_off: int, out_dir: str, idx: int, name: str, lzfse_bin: str):
