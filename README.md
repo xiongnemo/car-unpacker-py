@@ -27,7 +27,7 @@ Pure Python tool to list and extract assets from Apple `.car` (Asset Catalog) fi
 - Python 3.8+
 - `lzfse` binary in PATH or next to the script
 
-Build lzfse from source:
+Build [lzfse](https://github.com/lzfse/lzfse) from source:
 
 ```bash
 cd _tools/lzfse
