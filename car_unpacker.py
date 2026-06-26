@@ -761,6 +761,11 @@ def _process_rendition(csi_data: bytes, out_dir: str, idx: int, lzfse_bin: str):
         _extract_rawd_data(csi_data, bitmap_start, out_dir, idx, csi.name, lzfse_bin)
         return
 
+    # RLOC/COLR: named color
+    if bmp_tag in (b'RLOC', b'COLR'):
+        _extract_color(csi_data, bitmap_start, out_dir, idx, csi.name)
+        return
+
     # Find dmp2 magic
     dm2_off = csi_data.find(b'dmp2', bitmap_start)
     if dm2_off < 0:
@@ -768,6 +773,37 @@ def _process_rendition(csi_data: bytes, out_dir: str, idx: int, lzfse_bin: str):
         return
 
     _extract_dm2_image(csi_data, dm2_off, out_dir, idx, csi.name, lzfse_bin)
+
+
+def _extract_color(csi_data, offset, out_dir, idx, name):
+    if offset + 16 > len(csi_data):
+        print("    (COLR header too small)")
+        return
+
+    num_comp = struct.unpack_from('<I', csi_data, offset + 12)[0]
+    if num_comp > 10:
+        print(f"    (too many color components: {num_comp})")
+        return
+
+    comps = []
+    for i in range(num_comp):
+        comps.append(struct.unpack_from('<d', csi_data, offset + 16 + i * 8)[0])
+
+    rgba = [min(255, max(0, int(c * 255 + 0.5))) for c in comps[:4]]
+    while len(rgba) < 4:
+        rgba.append(255)
+
+    import json
+    color_json = json.dumps({
+        "name": name,
+        "components": comps,
+        "rgba": rgba,
+    })
+
+    out_path = os.path.join(out_dir, f"{idx:03d}_{sanitize_filename(name)}.json")
+    with open(out_path, 'w') as f:
+        f.write(color_json)
+    print(f"    Color: {color_json} -> {out_path}")
 
 
 def _extract_rawd_data(csi_data, offset, out_dir, idx, name, lzfse_bin):
